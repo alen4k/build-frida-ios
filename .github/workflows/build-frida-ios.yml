@@ -38,10 +38,23 @@ jobs:
           gmake --version
           dpkg-deb --version
 
+      - name: Create temporary Frida code-signing identity
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x .github/scripts/create-frida-cert.sh
+          .github/scripts/create-frida-cert.sh
+
+      - name: Verify signing identity before the long build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -n "${IOS_CERTID:-}"
+          security find-identity -v -p codesigning
+          security find-identity -v -p codesigning | grep -F "$IOS_CERTID"
+
       - name: Build Frida 17.5.0 universal iOS packages
         shell: bash
-        env:
-          IOS_CERTID: frida-cert
         run: |
           set -euxo pipefail
           chmod +x build_frida_17.5.0_universal_ios.sh
@@ -65,3 +78,11 @@ jobs:
           path: release-frida-17.5.0/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Remove temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${FRIDA_KEYCHAIN_PATH:-}" && -f "$FRIDA_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$FRIDA_KEYCHAIN_PATH" || true
+          fi
