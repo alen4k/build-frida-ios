@@ -86,6 +86,13 @@ python3 -m pip install --upgrade pip setuptools wheel
 
 export PYTHON="$(command -v python3)"
 export PYTHONWARNINGS=all
+
+# Frida signs helper/agent artifacts during the build itself. Validate the
+# identity before starting the expensive compile so CI fails immediately.
+if [[ "$IOS_CERTID" != "-" ]]; then
+  security find-identity -v -p codesigning | grep -Fq "$IOS_CERTID" \
+    || fail "Code-signing identity '$IOS_CERTID' is unavailable. Create/import it first, or explicitly use IOS_CERTID=- for ad-hoc signing."
+fi
 export IOS_CERTID
 export FRIDA_VERSION
 FRIDA_VERSION="$(releng/frida_version.py)"

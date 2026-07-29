@@ -113,3 +113,18 @@ Frida 完整构建占用较大。重新运行前可在工作流的依赖安装�
 ## 六、限制
 
 该工作流不包含旧 arm64e OABI slice，因为 GitHub 托管运行器不提供 Xcode 11.7。iPhone 13 + iOS 16.6 通常需要的是当前 arm64e ABI，以及同时包含 arm64、arm64e 的通用 agent；旧 OABI 主要服务更早系统环境。
+
+## `frida-cert` keychain 错误修复
+
+若日志出现：
+
+```text
+error: The specified item could not be found in the keychain.
+```
+
+说明 Frida 在编译阶段使用了 `IOS_CERTID=frida-cert`，但 GitHub 临时 macOS
+运行器的钥匙串中不存在该签名身份。v2 工作流会在编译前创建一个只在本次
+任务中存在的临时代码签名证书，并将证书 SHA-1 写入 `IOS_CERTID`。任务结束后
+临时钥匙串会被删除。
+
+直接提交 v2 中的全部文件并重新运行 Actions 即可，不需要配置 GitHub Secret。

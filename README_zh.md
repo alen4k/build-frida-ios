@@ -138,3 +138,10 @@ agent 必须同时包含 arm64 与 arm64e。
 ### 代码签名失败
 
 脚本优先使用名为 `frida-cert` 的签名身份；不存在时回退为 ad-hoc 签名。部分越狱组合要求自建 `frida-cert`，此时先在钥匙串中创建并信任该代码签名证书，再重新构建。
+
+## v2 修正：GitHub Actions 临时签名证书
+
+原工作流只设置了 `IOS_CERTID=frida-cert`，却没有在 GitHub macOS Runner 的
+Keychain 中创建该身份，导致构建在 `post-process.py` 调用 `codesign` 时失败。
+v2 新增 `.github/scripts/create-frida-cert.sh`，会创建临时 keychain、自签名
+code-signing 证书、配置无交互私钥访问，并在构建结束后删除。
