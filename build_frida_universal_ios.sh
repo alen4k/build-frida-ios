@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
-# Build a universal Frida 17.16.4 DEB for jailbroken iOS devices.
-# Target verified by design: iPhone 13 (A15), iOS 16.6.
-# Produces rootful, Dopamine/rootless and RootHide package variants.
+# Build a complete Frida iOS toolkit from the selected upstream tag.
+#
+# Primary target:
+#   - iPhone 13 (A15)
+#   - iOS 16.6
+#   - standard rootless jailbreak layout
+#
+# Output:
+#   - rootless/rootful DEB packages
+#   - universal Frida Gadget
+#   - frida-inject
+#   - standalone universal server and Agent
+#   - Gadget configuration
+#   - host-side requirements file
 set -Eeuo pipefail
 
 FRIDA_TAG="${FRIDA_TAG:-17.16.4}"
@@ -16,40 +27,67 @@ usage() {
 Usage: $(basename "$0") [options]
 
 Options:
-  --include-oabi       Also include the legacy arm64e ABI slice. This requires
-                       Xcode 11.7 at: ${XCODE11}
-  --output DIR         Output directory. Default: ${OUTPUT_DIR}
+  --include-oabi       Include the legacy arm64e ABI server slice.
+                       Requires Xcode 11.7 at: ${XCODE11}
+  --output DIR         Output directory.
+                       Default: ${OUTPUT_DIR}
   --keep-work          Keep the temporary source/build directory.
   -h, --help           Show this help.
 
-Default output for iPhone 13 / iOS 16.6 does not require legacy arm64e OABI.
-The important fix is a universal agent containing both arm64 and arm64e.
+The default iPhone 13 / iOS 16.6 build does not require the legacy
+arm64e OABI. The generated Agent and Gadget must contain arm64 + arm64e.
 USAGE
 }
 
 while (($#)); do
   case "$1" in
-    --include-oabi) INCLUDE_OABI=1; shift ;;
-    --output) OUTPUT_DIR="$2"; shift 2 ;;
-    --keep-work) KEEP_WORK=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    --include-oabi)
+      INCLUDE_OABI=1
+      shift
+      ;;
+    --output)
+      [[ $# -ge 2 ]] || { echo "--output requires a directory" >&2; exit 2; }
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --keep-work)
+      KEEP_WORK=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
   esac
 done
 
-fail() { echo "[ERROR] $*" >&2; exit 1; }
-info() { echo "[INFO] $*"; }
+fail() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
 
-[[ "$(uname -s)" == "Darwin" ]] || fail "This build must run on macOS. Xcode, lipo and codesign are required."
+info() {
+  echo "[INFO] $*"
+}
 
-for cmd in git gmake xcrun python3 npm node lipo codesign install_name_tool security; do
+[[ "$(uname -s)" == "Darwin" ]] || \
+  fail "This build must run on macOS because Xcode, lipo and codesign are required."
+
+for cmd in git gmake xcrun python3 npm node lipo codesign install_name_tool file; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Missing command: $cmd"
 done
 
-xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1 || fail "iPhoneOS SDK not found. Install full Xcode and select it with xcode-select."
+xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1 || \
+  fail "iPhoneOS SDK not found. Install full Xcode and select it with xcode-select."
 
 if (( INCLUDE_OABI == 1 )); then
-  [[ -d "$XCODE11" ]] || fail "Legacy OABI requested, but Xcode 11.7 was not found at $XCODE11"
+  [[ -d "$XCODE11" ]] || \
+    fail "Legacy OABI requested, but Xcode 11.7 was not found at ${XCODE11}"
   export XCODE11
 fi
 
@@ -58,19 +96,32 @@ WORK_DIR="$(mktemp -d "/tmp/frida-${FRIDA_TAG}-ios.XXXXXX")"
 DIST_DIR="${WORK_DIR}/dist"
 ASSET_DIR="${WORK_DIR}/ios-assets"
 SLICE_DIR="${WORK_DIR}/slices"
-mkdir -p "$DIST_DIR" "$ASSET_DIR/usr/bin" "$ASSET_DIR/usr/lib/frida-1.0" "$SLICE_DIR" "$OUTPUT_DIR"
+TOOLS_DIR="${OUTPUT_DIR}/ios-tools"
+
+mkdir -p \
+  "$DIST_DIR" \
+  "$ASSET_DIR/usr/bin" \
+  "$ASSET_DIR/usr/lib/frida-1.0" \
+  "$SLICE_DIR" \
+  "$TOOLS_DIR"
 
 cleanup() {
   if (( KEEP_WORK == 0 )); then
     rm -rf "$WORK_DIR"
   else
-    echo "[INFO] Kept work directory: $WORK_DIR"
+    info "Kept work directory: $WORK_DIR"
   fi
 }
 trap cleanup EXIT INT TERM
 
 info "Cloning Frida ${FRIDA_TAG}"
-git clone --branch "$FRIDA_TAG" --single-branch --filter=blob:none https://github.com/frida/frida.git "${WORK_DIR}/frida"
+git clone \
+  --branch "$FRIDA_TAG" \
+  --single-branch \
+  --filter=blob:none \
+  https://github.com/frida/frida.git \
+  "${WORK_DIR}/frida"
+
 cd "${WORK_DIR}/frida"
 
 git submodule update --init --depth 1 releng
@@ -86,19 +137,18 @@ python3 -m pip install --upgrade pip setuptools wheel
 
 export PYTHON="$(command -v python3)"
 export PYTHONWARNINGS=all
-
-# Frida signs helper/agent artifacts during the build itself.
-# For jailbroken iOS packages the default is ad-hoc signing ("-"), which keeps
-# the supplied entitlements without requiring a persistent Keychain identity.
-if [[ "$IOS_CERTID" == "-" ]]; then
-  info "Using ad-hoc signing for Frida helper and agent artifacts"
-else
-  info "Using configured code-signing identity: ${IOS_CERTID}"
-fi
 export IOS_CERTID
-export FRIDA_VERSION
+
+if [[ "$IOS_CERTID" == "-" ]]; then
+  info "Using ad-hoc signing for jailbreak-targeted artifacts"
+else
+  info "Using configured signing identity: ${IOS_CERTID}"
+fi
+
 FRIDA_VERSION="$(releng/frida_version.py)"
-[[ "$FRIDA_VERSION" == "$FRIDA_TAG" ]] || fail "Checked out ${FRIDA_TAG}, but build version is ${FRIDA_VERSION}"
+export FRIDA_VERSION
+[[ "$FRIDA_VERSION" == "$FRIDA_TAG" ]] || \
+  fail "Checked out ${FRIDA_TAG}, but upstream build version is ${FRIDA_VERSION}"
 
 build_target() {
   local host="$1"
@@ -108,16 +158,18 @@ build_target() {
 
   info "Building ${host}"
   export MESON_BUILD_ROOT="$build_root"
+
   ./configure \
     --prefix=/usr \
     --host="$host" \
     -- \
     -Dfrida-core:assets=installed
+
   gmake -j"$JOBS"
   DESTDIR="$dest_root" gmake -j"$JOBS" install
 }
 
-# Frida's ios-arm64e build contains the current arm64 and arm64e variants.
+# Current Frida ios-arm64e builds universal arm64 + arm64e fruity artifacts.
 build_target ios-arm64e arm64e
 
 if (( INCLUDE_OABI == 1 )); then
@@ -126,81 +178,226 @@ if (( INCLUDE_OABI == 1 )); then
     rm -rf tmp
   else
     rm -rf tmp
-    info "Prebuilt legacy arm64e SDK was not found; building it with Xcode 11.7"
+    info "Prebuilt legacy arm64e SDK not found; building it with Xcode 11.7"
     ./releng/deps.py build --bundle=sdk --host=ios-arm64eoabi
   fi
   build_target ios-arm64eoabi arm64eoabi
 fi
 
-SERVER_FAT_SOURCE="${DIST_DIR}/arm64e/usr/bin/frida-server"
+SERVER_SOURCE="${DIST_DIR}/arm64e/usr/bin/frida-server"
+INJECT_SOURCE="${DIST_DIR}/arm64e/usr/bin/frida-inject"
 
-# Frida 17.x installs the external agent under /usr/lib/frida-1.0.
-# Keep a compatibility fallback for older tags that used /usr/lib/frida.
-AGENT_SOURCE=""
-for candidate in   "${DIST_DIR}/arm64e/usr/lib/frida-1.0/frida-agent.dylib"   "${DIST_DIR}/arm64e/usr/lib/frida/frida-agent.dylib"
-do
-  if [[ -f "$candidate" ]]; then
-    AGENT_SOURCE="$candidate"
-    break
-  fi
-done
+find_asset() {
+  local description="$1"
+  shift
 
-[[ -f "$SERVER_FAT_SOURCE" ]] || fail "frida-server was not generated: ${SERVER_FAT_SOURCE}"
-if [[ -z "$AGENT_SOURCE" ]]; then
-  echo "[DEBUG] Candidate agent files under ${DIST_DIR}/arm64e/usr/lib:" >&2
-  find "${DIST_DIR}/arm64e/usr/lib" -maxdepth 3 -type f -name 'frida-agent.dylib' -print >&2 || true
-  fail "frida-agent.dylib was not generated in a supported install path"
-fi
-info "Using installed agent: ${AGENT_SOURCE}"
+  local candidate
+  for candidate in "$@"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
 
+  fail "${description} was not generated. Checked: $*"
+}
+
+AGENT_SOURCE="$(find_asset \
+  "frida-agent.dylib" \
+  "${DIST_DIR}/arm64e/usr/lib/frida-1.0/frida-agent.dylib" \
+  "${DIST_DIR}/arm64e/usr/lib/frida/frida-agent.dylib")"
+
+GADGET_SOURCE="$(find_asset \
+  "frida-gadget.dylib" \
+  "${DIST_DIR}/arm64e/usr/lib/frida-1.0/frida-gadget.dylib" \
+  "${DIST_DIR}/arm64e/usr/lib/frida/frida-gadget.dylib")"
+
+[[ -f "$SERVER_SOURCE" ]] || \
+  fail "frida-server was not generated: ${SERVER_SOURCE}"
+[[ -f "$INJECT_SOURCE" ]] || \
+  fail "frida-inject was not generated: ${INJECT_SOURCE}"
+
+info "Using Agent: ${AGENT_SOURCE}"
+info "Using Gadget: ${GADGET_SOURCE}"
+
+# ---------------------------------------------------------------------------
+# Build universal server
+# ---------------------------------------------------------------------------
 info "Extracting and signing server slices"
+
 for arch in arm64 arm64e; do
-  lipo "$SERVER_FAT_SOURCE" -thin "$arch" -output "${SLICE_DIR}/frida-server-${arch}"
-  codesign -f -s - --preserve-metadata=entitlements --timestamp=none "${SLICE_DIR}/frida-server-${arch}"
+  lipo "$SERVER_SOURCE" \
+    -thin "$arch" \
+    -output "${SLICE_DIR}/frida-server-${arch}"
+
+  codesign \
+    --force \
+    --sign "$IOS_CERTID" \
+    --preserve-metadata=entitlements \
+    --timestamp=none \
+    --generate-entitlement-der \
+    "${SLICE_DIR}/frida-server-${arch}"
 done
 
-server_inputs=(
-  "${SLICE_DIR}/frida-server-arm64"
-)
+server_inputs=("${SLICE_DIR}/frida-server-arm64")
 
 if (( INCLUDE_OABI == 1 )); then
   OABI_SOURCE="${DIST_DIR}/arm64eoabi/usr/bin/frida-server"
-  lipo "$OABI_SOURCE" -thin arm64e -output "${SLICE_DIR}/frida-server-arm64eoabi"
-  codesign -f -s - --preserve-metadata=entitlements --timestamp=none "${SLICE_DIR}/frida-server-arm64eoabi"
+  [[ -f "$OABI_SOURCE" ]] || fail "Legacy OABI server was not generated"
+
+  lipo "$OABI_SOURCE" \
+    -thin arm64e \
+    -output "${SLICE_DIR}/frida-server-arm64eoabi"
+
+  codesign \
+    --force \
+    --sign "$IOS_CERTID" \
+    --preserve-metadata=entitlements \
+    --timestamp=none \
+    --generate-entitlement-der \
+    "${SLICE_DIR}/frida-server-arm64eoabi"
+
   server_inputs+=("${SLICE_DIR}/frida-server-arm64eoabi")
 fi
+
 server_inputs+=("${SLICE_DIR}/frida-server-arm64e")
 
-python3 ./releng/mkfatmacho.py "${ASSET_DIR}/usr/bin/frida-server" "${server_inputs[@]}"
+python3 ./releng/mkfatmacho.py \
+  "${ASSET_DIR}/usr/bin/frida-server" \
+  "${server_inputs[@]}"
 
-info "Preparing universal arm64 + arm64e agent"
-cp "$AGENT_SOURCE" "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
-install_name_tool -id FridaAgent "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
+codesign \
+  --force \
+  --sign "$IOS_CERTID" \
+  --preserve-metadata=entitlements \
+  --timestamp=none \
+  --generate-entitlement-der \
+  "${ASSET_DIR}/usr/bin/frida-server"
 
-SIGN_ID="$IOS_CERTID"
-if [[ "$SIGN_ID" == "-" ]]; then
-  info "Signing final universal agent ad-hoc"
-else
-  info "Signing final universal agent with identity: ${SIGN_ID}"
-fi
-codesign -f -s "$SIGN_ID" \
+# ---------------------------------------------------------------------------
+# Prepare universal external Agent
+# ---------------------------------------------------------------------------
+info "Preparing universal arm64 + arm64e Agent"
+
+cp "$AGENT_SOURCE" \
+  "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
+
+install_name_tool \
+  -id FridaAgent \
+  "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
+
+codesign \
+  --force \
+  --sign "$IOS_CERTID" \
   --preserve-metadata=entitlements \
   --timestamp=none \
   --generate-entitlement-der \
   "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
 
-AGENT_ARCHS="$(lipo -archs "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib")"
-[[ "$AGENT_ARCHS" == *arm64* ]] || fail "Agent is missing arm64: ${AGENT_ARCHS}"
-[[ "$AGENT_ARCHS" == *arm64e* ]] || fail "Agent is missing arm64e: ${AGENT_ARCHS}"
+AGENT_ARCHS="$(lipo -archs \
+  "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib")"
+
+[[ "$AGENT_ARCHS" == *arm64* ]] || \
+  fail "Agent is missing arm64: ${AGENT_ARCHS}"
+[[ "$AGENT_ARCHS" == *arm64e* ]] || \
+  fail "Agent is missing arm64e: ${AGENT_ARCHS}"
+
 info "Agent slices: ${AGENT_ARCHS}"
 
+# ---------------------------------------------------------------------------
+# Export Gadget and other standalone iOS tools
+# ---------------------------------------------------------------------------
+info "Exporting Gadget and standalone iOS tools"
+
+cp "$GADGET_SOURCE" "${TOOLS_DIR}/FridaGadget.dylib"
+cp "$INJECT_SOURCE" "${TOOLS_DIR}/frida-inject"
+cp "${ASSET_DIR}/usr/bin/frida-server" "${TOOLS_DIR}/frida-server"
+cp "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib" \
+  "${TOOLS_DIR}/frida-agent.dylib"
+
+chmod 755 \
+  "${TOOLS_DIR}/frida-inject" \
+  "${TOOLS_DIR}/frida-server"
+
+# Re-sign copied artifacts so the final exported files are self-consistent.
+for artifact in \
+  "${TOOLS_DIR}/FridaGadget.dylib" \
+  "${TOOLS_DIR}/frida-inject" \
+  "${TOOLS_DIR}/frida-server" \
+  "${TOOLS_DIR}/frida-agent.dylib"
+do
+  codesign \
+    --force \
+    --sign "$IOS_CERTID" \
+    --preserve-metadata=entitlements \
+    --timestamp=none \
+    --generate-entitlement-der \
+    "$artifact"
+done
+
+GADGET_ARCHS="$(lipo -archs "${TOOLS_DIR}/FridaGadget.dylib")"
+SERVER_ARCHS="$(lipo -archs "${TOOLS_DIR}/frida-server")"
+INJECT_ARCHS="$(lipo -archs "${TOOLS_DIR}/frida-inject" 2>/dev/null || true)"
+
+[[ "$GADGET_ARCHS" == *arm64* ]] || \
+  fail "Gadget is missing arm64: ${GADGET_ARCHS}"
+[[ "$GADGET_ARCHS" == *arm64e* ]] || \
+  fail "Gadget is missing arm64e: ${GADGET_ARCHS}"
+
+info "Gadget slices: ${GADGET_ARCHS}"
+info "Server slices: ${SERVER_ARCHS}"
+info "frida-inject slices: ${INJECT_ARCHS:-unknown}"
+
+cat > "${TOOLS_DIR}/FridaGadget.config" <<'JSON'
+{
+  "interaction": {
+    "type": "listen",
+    "address": "127.0.0.1",
+    "port": 27042,
+    "on_port_conflict": "pick-next",
+    "on_load": "wait"
+  },
+  "teardown": "minimal",
+  "runtime": "qjs",
+  "code_signing": "optional"
+}
+JSON
+
+cat > "${TOOLS_DIR}/README.txt" <<'TEXT'
+FridaGadget.dylib
+  Universal arm64 + arm64e Gadget for embedding into an authorized iOS app.
+
+FridaGadget.config
+  Matching Gadget configuration. Keep the base name identical to the dylib.
+
+frida-inject
+  Device-side injection utility.
+
+frida-server
+  Standalone universal server used by the generated DEB packages.
+
+frida-agent.dylib
+  External installed-assets Agent. Standard rootless package path:
+  /var/jb/usr/lib/frida-1.0/frida-agent.dylib
+TEXT
+
+cat > "${OUTPUT_DIR}/requirements-host.txt" <<REQ
+frida==${FRIDA_VERSION}
+frida-tools
+REQ
+
+# ---------------------------------------------------------------------------
+# Package DEBs
+# ---------------------------------------------------------------------------
 PACKAGE_HELPER="./subprojects/frida-core/tools/package-server-fruity.sh"
-[[ -x "$PACKAGE_HELPER" ]] || fail "Packaging helper was not found: ${PACKAGE_HELPER}"
+[[ -x "$PACKAGE_HELPER" ]] || \
+  fail "Packaging helper not found: ${PACKAGE_HELPER}"
 
-# Current Frida packaging helper expects usr/lib/frida-1.0/frida-agent.dylib.
-grep -Fq 'usr/lib/frida-1.0/frida-agent.dylib' "$PACKAGE_HELPER"   || fail "Unexpected package-server-fruity.sh agent path; inspect the selected Frida tag before packaging"
+grep -Fq 'usr/lib/frida-1.0/frida-agent.dylib' "$PACKAGE_HELPER" || \
+  fail "Selected Frida tag uses an unexpected installed Agent path"
 
-info "Packaging three jailbreak variants"
+info "Packaging jailbreak variants"
+
 for pkg_arch in arm arm64 arm64e; do
   "$PACKAGE_HELPER" \
     "iphoneos-${pkg_arch}" \
@@ -210,21 +407,35 @@ done
 
 cat > "${OUTPUT_DIR}/BUILD-INFO.txt" <<INFO
 Frida version: ${FRIDA_VERSION}
-Target device: iPhone 13 (A15)
-Target iOS: 16.6
-Universal agent slices: ${AGENT_ARCHS}
+Primary target device: iPhone 13 (A15)
+Primary target iOS: 16.6
+Primary jailbreak layout: standard rootless
+Universal Agent slices: ${AGENT_ARCHS}
+Universal Gadget slices: ${GADGET_ARCHS}
+Universal Server slices: ${SERVER_ARCHS}
+frida-inject slices: ${INJECT_ARCHS:-unknown}
+Installed Agent namespace: /usr/lib/frida-1.0
+Standard rootless Agent path: /var/jb/usr/lib/frida-1.0/frida-agent.dylib
 Legacy arm64e OABI included: ${INCLUDE_OABI}
+Signing identity: ${IOS_CERTID}
 Build date: $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
 Package selection:
-  iphoneos-arm64 = Dopamine/rootless
-  iphoneos-arm64e = RootHide
-  iphoneos-arm = rootful
+  iphoneos-arm64  = standard rootless
+  iphoneos-arm    = rootful
+  iphoneos-arm64e = RootHide-style package architecture; validate separately
 INFO
 
+# The workflow regenerates this file after adding the ObjC bridge bundle.
 (
   cd "$OUTPUT_DIR"
-  shasum -a 256 ./*.deb > SHA256SUMS
+  : > SHA256SUMS
+  while IFS= read -r item; do
+    shasum -a 256 "$item"
+  done < <(
+    find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort
+  ) > SHA256SUMS
 )
 
 info "Build complete: ${OUTPUT_DIR}"
-ls -lh "$OUTPUT_DIR"
+find "$OUTPUT_DIR" -maxdepth 3 -type f -print | LC_ALL=C sort
