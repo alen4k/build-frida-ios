@@ -58,7 +58,7 @@ WORK_DIR="$(mktemp -d "/tmp/frida-${FRIDA_TAG}-ios.XXXXXX")"
 DIST_DIR="${WORK_DIR}/dist"
 ASSET_DIR="${WORK_DIR}/ios-assets"
 SLICE_DIR="${WORK_DIR}/slices"
-mkdir -p "$DIST_DIR" "$ASSET_DIR/usr/bin" "$ASSET_DIR/usr/lib/frida" "$SLICE_DIR" "$OUTPUT_DIR"
+mkdir -p "$DIST_DIR" "$ASSET_DIR/usr/bin" "$ASSET_DIR/usr/lib/frida-1.0" "$SLICE_DIR" "$OUTPUT_DIR"
 
 cleanup() {
   if (( KEEP_WORK == 0 )); then
@@ -133,9 +133,25 @@ if (( INCLUDE_OABI == 1 )); then
 fi
 
 SERVER_FAT_SOURCE="${DIST_DIR}/arm64e/usr/bin/frida-server"
-AGENT_SOURCE="${DIST_DIR}/arm64e/usr/lib/frida/frida-agent.dylib"
-[[ -f "$SERVER_FAT_SOURCE" ]] || fail "frida-server was not generated"
-[[ -f "$AGENT_SOURCE" ]] || fail "frida-agent.dylib was not generated"
+
+# Frida 17.x installs the external agent under /usr/lib/frida-1.0.
+# Keep a compatibility fallback for older tags that used /usr/lib/frida.
+AGENT_SOURCE=""
+for candidate in   "${DIST_DIR}/arm64e/usr/lib/frida-1.0/frida-agent.dylib"   "${DIST_DIR}/arm64e/usr/lib/frida/frida-agent.dylib"
+do
+  if [[ -f "$candidate" ]]; then
+    AGENT_SOURCE="$candidate"
+    break
+  fi
+done
+
+[[ -f "$SERVER_FAT_SOURCE" ]] || fail "frida-server was not generated: ${SERVER_FAT_SOURCE}"
+if [[ -z "$AGENT_SOURCE" ]]; then
+  echo "[DEBUG] Candidate agent files under ${DIST_DIR}/arm64e/usr/lib:" >&2
+  find "${DIST_DIR}/arm64e/usr/lib" -maxdepth 3 -type f -name 'frida-agent.dylib' -print >&2 || true
+  fail "frida-agent.dylib was not generated in a supported install path"
+fi
+info "Using installed agent: ${AGENT_SOURCE}"
 
 info "Extracting and signing server slices"
 for arch in arm64 arm64e; do
@@ -158,8 +174,8 @@ server_inputs+=("${SLICE_DIR}/frida-server-arm64e")
 python3 ./releng/mkfatmacho.py "${ASSET_DIR}/usr/bin/frida-server" "${server_inputs[@]}"
 
 info "Preparing universal arm64 + arm64e agent"
-cp "$AGENT_SOURCE" "${ASSET_DIR}/usr/lib/frida/frida-agent.dylib"
-install_name_tool -id FridaAgent "${ASSET_DIR}/usr/lib/frida/frida-agent.dylib"
+cp "$AGENT_SOURCE" "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
+install_name_tool -id FridaAgent "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
 
 SIGN_ID="$IOS_CERTID"
 if [[ "$SIGN_ID" == "-" ]]; then
@@ -171,15 +187,18 @@ codesign -f -s "$SIGN_ID" \
   --preserve-metadata=entitlements \
   --timestamp=none \
   --generate-entitlement-der \
-  "${ASSET_DIR}/usr/lib/frida/frida-agent.dylib"
+  "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib"
 
-AGENT_ARCHS="$(lipo -archs "${ASSET_DIR}/usr/lib/frida/frida-agent.dylib")"
+AGENT_ARCHS="$(lipo -archs "${ASSET_DIR}/usr/lib/frida-1.0/frida-agent.dylib")"
 [[ "$AGENT_ARCHS" == *arm64* ]] || fail "Agent is missing arm64: ${AGENT_ARCHS}"
 [[ "$AGENT_ARCHS" == *arm64e* ]] || fail "Agent is missing arm64e: ${AGENT_ARCHS}"
 info "Agent slices: ${AGENT_ARCHS}"
 
 PACKAGE_HELPER="./subprojects/frida-core/tools/package-server-fruity.sh"
 [[ -x "$PACKAGE_HELPER" ]] || fail "Packaging helper was not found: ${PACKAGE_HELPER}"
+
+# Current Frida packaging helper expects usr/lib/frida-1.0/frida-agent.dylib.
+grep -Fq 'usr/lib/frida-1.0/frida-agent.dylib' "$PACKAGE_HELPER"   || fail "Unexpected package-server-fruity.sh agent path; inspect the selected Frida tag before packaging"
 
 info "Packaging three jailbreak variants"
 for pkg_arch in arm arm64 arm64e; do
