@@ -8,7 +8,7 @@ FRIDA_TAG="${FRIDA_TAG:-17.16.4}"
 INCLUDE_OABI=0
 KEEP_WORK=0
 OUTPUT_DIR="${PWD}/release-frida-${FRIDA_TAG}"
-IOS_CERTID="${IOS_CERTID:-frida-cert}"
+IOS_CERTID="${IOS_CERTID:--}"
 XCODE11="${XCODE11:-/Applications/Xcode-11.7.app}"
 
 usage() {
@@ -87,11 +87,13 @@ python3 -m pip install --upgrade pip setuptools wheel
 export PYTHON="$(command -v python3)"
 export PYTHONWARNINGS=all
 
-# Frida signs helper/agent artifacts during the build itself. Validate the
-# identity before starting the expensive compile so CI fails immediately.
-if [[ "$IOS_CERTID" != "-" ]]; then
-  security find-identity -v -p codesigning | grep -Fq "$IOS_CERTID" \
-    || fail "Code-signing identity '$IOS_CERTID' is unavailable. Create/import it first, or explicitly use IOS_CERTID=- for ad-hoc signing."
+# Frida signs helper/agent artifacts during the build itself.
+# For jailbroken iOS packages the default is ad-hoc signing ("-"), which keeps
+# the supplied entitlements without requiring a persistent Keychain identity.
+if [[ "$IOS_CERTID" == "-" ]]; then
+  info "Using ad-hoc signing for Frida helper and agent artifacts"
+else
+  info "Using configured code-signing identity: ${IOS_CERTID}"
 fi
 export IOS_CERTID
 export FRIDA_VERSION
@@ -159,12 +161,11 @@ info "Preparing universal arm64 + arm64e agent"
 cp "$AGENT_SOURCE" "${ASSET_DIR}/usr/lib/frida/frida-agent.dylib"
 install_name_tool -id FridaAgent "${ASSET_DIR}/usr/lib/frida/frida-agent.dylib"
 
-SIGN_ID="-"
-if security find-identity -v -p codesigning | grep -Fq "$IOS_CERTID"; then
-  SIGN_ID="$IOS_CERTID"
-  info "Signing agent with identity: ${IOS_CERTID}"
+SIGN_ID="$IOS_CERTID"
+if [[ "$SIGN_ID" == "-" ]]; then
+  info "Signing final universal agent ad-hoc"
 else
-  info "Signing agent ad-hoc. Identity '${IOS_CERTID}' was not found."
+  info "Signing final universal agent with identity: ${SIGN_ID}"
 fi
 codesign -f -s "$SIGN_ID" \
   --preserve-metadata=entitlements \
