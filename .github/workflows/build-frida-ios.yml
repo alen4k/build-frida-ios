@@ -1,4 +1,4 @@
-name: Build Frida 17.16.4 Universal iOS DEB v4
+name: Build Frida 17.16.4 Universal iOS DEB v5
 
 on:
   workflow_dispatch:
@@ -18,6 +18,9 @@ concurrency:
 env:
   HOMEBREW_NO_AUTO_UPDATE: '1'
   FRIDA_VERSION: ${{ inputs.frida_version || '17.16.4' }}
+  # Jailbroken iOS package: use ad-hoc signing. Frida's post-process.py will
+  # invoke codesign with "-s -" while preserving the required entitlements.
+  IOS_CERTID: '-'
 
 jobs:
   build:
@@ -28,6 +31,11 @@ jobs:
     steps:
       - name: Checkout build kit
         uses: actions/checkout@v4
+
+      - name: Select stable Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Show macOS and Xcode environment
         shell: bash
@@ -50,39 +58,32 @@ jobs:
           gmake --version
           dpkg-deb --version
 
-      - name: Create temporary Frida code-signing identity
-        timeout-minutes: 3
+      - name: Verify ad-hoc signing mode
         shell: bash
         run: |
           set -euxo pipefail
-          chmod +x .github/scripts/create-frida-cert.sh
-          .github/scripts/create-frida-cert.sh
-
-      - name: Verify signing identity before the long build
-        shell: bash
-        run: |
-          set -euxo pipefail
-          test -n "${IOS_CERTID:-}"
-          test -n "${FRIDA_KEYCHAIN_PATH:-}"
-          test -f "${FRIDA_KEYCHAIN_PATH}"
-          echo "Using IOS_CERTID=${IOS_CERTID}"
-          security find-certificate -Z -c frida-cert "${FRIDA_KEYCHAIN_PATH}"
+          test "${IOS_CERTID}" = "-"
+          cat > "${RUNNER_TEMP}/codesign-probe.c" <<'C'
+          int main(void) { return 0; }
+          C
+          xcrun clang "${RUNNER_TEMP}/codesign-probe.c" -o "${RUNNER_TEMP}/codesign-probe"
+          codesign --force --sign - --timestamp=none "${RUNNER_TEMP}/codesign-probe"
+          codesign --verify --strict "${RUNNER_TEMP}/codesign-probe"
+          echo "Ad-hoc codesign is available."
 
       - name: Build universal iOS packages
         shell: bash
         run: |
           set -euxo pipefail
           chmod +x build_frida_universal_ios.sh
-          FRIDA_TAG="${FRIDA_VERSION}" ./build_frida_universal_ios.sh \
-            --output "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
+          FRIDA_TAG="${FRIDA_VERSION}" IOS_CERTID="-"             ./build_frida_universal_ios.sh             --output "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
 
       - name: Verify rootless package and Mach-O slices
         shell: bash
         run: |
           set -euxo pipefail
           chmod +x verify_frida_package_macos.sh
-          ./verify_frida_package_macos.sh \
-            "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/frida_${FRIDA_VERSION}_iphoneos-arm64_universal.deb"
+          ./verify_frida_package_macos.sh             "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/frida_${FRIDA_VERSION}_iphoneos-arm64_universal.deb"
           cat "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/BUILD-INFO.txt"
           cat "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/SHA256SUMS"
 
@@ -93,11 +94,3 @@ jobs:
           path: release-frida-${{ env.FRIDA_VERSION }}/
           if-no-files-found: error
           retention-days: 7
-
-      - name: Remove temporary signing keychain
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "${FRIDA_KEYCHAIN_PATH:-}" && -f "$FRIDA_KEYCHAIN_PATH" ]]; then
-            security delete-keychain "$FRIDA_KEYCHAIN_PATH" || true
-          fi
