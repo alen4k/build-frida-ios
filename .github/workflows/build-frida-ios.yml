@@ -1,4 +1,4 @@
-name: Build Frida 17.16.4 Universal iOS DEB v5
+name: Build Frida 17.16.4 Universal iOS DEB v6
 
 on:
   workflow_dispatch:
