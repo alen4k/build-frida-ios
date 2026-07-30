@@ -1,4 +1,4 @@
-name: Build Frida 17.16.4 Universal iOS DEB v6
+name: Build Frida 17.16.4 Complete iOS Toolkit v7
 
 on:
   workflow_dispatch:
@@ -12,19 +12,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: frida-ios-${{ github.ref }}
+  group: frida-ios-toolkit-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   HOMEBREW_NO_AUTO_UPDATE: '1'
   FRIDA_VERSION: ${{ inputs.frida_version || '17.16.4' }}
-  # Jailbroken iOS package: use ad-hoc signing. Frida's post-process.py will
-  # invoke codesign with "-s -" while preserving the required entitlements.
   IOS_CERTID: '-'
 
 jobs:
   build:
-    name: iPhone 13 / iOS 16.6 universal Frida
+    name: iPhone 13 / iOS 16.6 complete toolkit
     runs-on: macos-15
     timeout-minutes: 360
 
@@ -37,7 +35,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Show macOS and Xcode environment
+      - name: Select Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Show build environment
         shell: bash
         run: |
           set -euxo pipefail
@@ -48,6 +51,7 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
           python3 --version
           node --version
+          npm --version
           df -h
 
       - name: Install build dependencies
@@ -58,39 +62,112 @@ jobs:
           gmake --version
           dpkg-deb --version
 
-      - name: Verify ad-hoc signing mode
+      - name: Verify ad-hoc signing
         shell: bash
         run: |
           set -euxo pipefail
           test "${IOS_CERTID}" = "-"
+
           cat > "${RUNNER_TEMP}/codesign-probe.c" <<'C'
           int main(void) { return 0; }
           C
-          xcrun clang "${RUNNER_TEMP}/codesign-probe.c" -o "${RUNNER_TEMP}/codesign-probe"
-          codesign --force --sign - --timestamp=none "${RUNNER_TEMP}/codesign-probe"
-          codesign --verify --strict "${RUNNER_TEMP}/codesign-probe"
-          echo "Ad-hoc codesign is available."
 
-      - name: Build universal iOS packages
+          xcrun clang \
+            "${RUNNER_TEMP}/codesign-probe.c" \
+            -o "${RUNNER_TEMP}/codesign-probe"
+
+          codesign \
+            --force \
+            --sign - \
+            --timestamp=none \
+            "${RUNNER_TEMP}/codesign-probe"
+
+          codesign --verify --strict "${RUNNER_TEMP}/codesign-probe"
+
+      - name: Build Frida DEBs, Gadget and iOS tools
         shell: bash
         run: |
           set -euxo pipefail
           chmod +x build_frida_universal_ios.sh
-          FRIDA_TAG="${FRIDA_VERSION}" IOS_CERTID="-"             ./build_frida_universal_ios.sh             --output "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
 
-      - name: Verify rootless package and Mach-O slices
+          FRIDA_TAG="${FRIDA_VERSION}" \
+          IOS_CERTID="-" \
+            ./build_frida_universal_ios.sh \
+              --output "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
+
+      - name: Build Frida 17 ObjC bridge loader
         shell: bash
         run: |
           set -euxo pipefail
-          chmod +x verify_frida_package_macos.sh
-          ./verify_frida_package_macos.sh             "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/frida_${FRIDA_VERSION}_iphoneos-arm64_universal.deb"
-          cat "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/BUILD-INFO.txt"
-          cat "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/SHA256SUMS"
 
-      - name: Upload DEB artifacts
+          cd bridge-loader
+          npm install --no-audit --no-fund
+          npm run build
+
+          test -s dist/objc-bridge-loader.bundle.js
+
+          mkdir -p \
+            "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/scripts"
+
+          cp dist/objc-bridge-loader.bundle.js \
+            "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/scripts/"
+
+      - name: Generate complete checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
+          : > SHA256SUMS
+
+          while IFS= read -r item; do
+            shasum -a 256 "$item"
+          done < <(
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort
+          ) > SHA256SUMS
+
+          cat SHA256SUMS
+
+      - name: Verify rootless DEB and standalone tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          chmod +x verify_frida_package_macos.sh
+
+          ./verify_frida_package_macos.sh \
+            "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/frida_${FRIDA_VERSION}_iphoneos-arm64_universal.deb"
+
+          RELEASE="${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
+
+          test -s "${RELEASE}/ios-tools/FridaGadget.dylib"
+          test -s "${RELEASE}/ios-tools/FridaGadget.config"
+          test -s "${RELEASE}/ios-tools/frida-inject"
+          test -s "${RELEASE}/ios-tools/frida-server"
+          test -s "${RELEASE}/ios-tools/frida-agent.dylib"
+          test -s "${RELEASE}/scripts/objc-bridge-loader.bundle.js"
+
+          GADGET_ARCHS="$(lipo -archs "${RELEASE}/ios-tools/FridaGadget.dylib")"
+          AGENT_ARCHS="$(lipo -archs "${RELEASE}/ios-tools/frida-agent.dylib")"
+
+          [[ "${GADGET_ARCHS}" == *arm64* ]]
+          [[ "${GADGET_ARCHS}" == *arm64e* ]]
+          [[ "${AGENT_ARCHS}" == *arm64* ]]
+          [[ "${AGENT_ARCHS}" == *arm64e* ]]
+
+          codesign --verify --strict \
+            "${RELEASE}/ios-tools/FridaGadget.dylib"
+          codesign --verify --strict \
+            "${RELEASE}/ios-tools/frida-server"
+          codesign --verify --strict \
+            "${RELEASE}/ios-tools/frida-agent.dylib"
+
+          cat "${RELEASE}/BUILD-INFO.txt"
+
+      - name: Upload complete Frida iOS toolkit
         uses: actions/upload-artifact@v4
         with:
-          name: frida-${{ env.FRIDA_VERSION }}-iphone13-ios16.6-universal-debs
+          name: frida-${{ env.FRIDA_VERSION }}-iphone13-ios16.6-complete-toolkit
           path: release-frida-${{ env.FRIDA_VERSION }}/
           if-no-files-found: error
           retention-days: 7
