@@ -1,10 +1,23 @@
-name: Build Frida 17.5.0 Universal iOS DEB
+name: Build Frida 17.16.4 Universal iOS DEB v4
 
 on:
   workflow_dispatch:
+    inputs:
+      frida_version:
+        description: Frida tag/version to build
+        required: true
+        default: '17.16.4'
 
 permissions:
   contents: read
+
+concurrency:
+  group: frida-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  FRIDA_VERSION: ${{ inputs.frida_version || '17.16.4' }}
 
 jobs:
   build:
@@ -33,12 +46,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          brew update
           brew install make dpkg
           gmake --version
           dpkg-deb --version
 
       - name: Create temporary Frida code-signing identity
+        timeout-minutes: 3
         shell: bash
         run: |
           set -euxo pipefail
@@ -50,16 +63,18 @@ jobs:
         run: |
           set -euxo pipefail
           test -n "${IOS_CERTID:-}"
-          security find-identity -v -p codesigning
-          security find-identity -v -p codesigning | grep -F "$IOS_CERTID"
+          test -n "${FRIDA_KEYCHAIN_PATH:-}"
+          test -f "${FRIDA_KEYCHAIN_PATH}"
+          echo "Using IOS_CERTID=${IOS_CERTID}"
+          security find-certificate -Z -c frida-cert "${FRIDA_KEYCHAIN_PATH}"
 
-      - name: Build Frida 17.5.0 universal iOS packages
+      - name: Build universal iOS packages
         shell: bash
         run: |
           set -euxo pipefail
-          chmod +x build_frida_17.5.0_universal_ios.sh
-          ./build_frida_17.5.0_universal_ios.sh \
-            --output "${GITHUB_WORKSPACE}/release-frida-17.5.0"
+          chmod +x build_frida_universal_ios.sh
+          FRIDA_TAG="${FRIDA_VERSION}" ./build_frida_universal_ios.sh \
+            --output "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}"
 
       - name: Verify rootless package and Mach-O slices
         shell: bash
@@ -67,15 +82,15 @@ jobs:
           set -euxo pipefail
           chmod +x verify_frida_package_macos.sh
           ./verify_frida_package_macos.sh \
-            "${GITHUB_WORKSPACE}/release-frida-17.5.0/frida_17.5.0_iphoneos-arm64_universal.deb"
-          cat "${GITHUB_WORKSPACE}/release-frida-17.5.0/BUILD-INFO.txt"
-          cat "${GITHUB_WORKSPACE}/release-frida-17.5.0/SHA256SUMS"
+            "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/frida_${FRIDA_VERSION}_iphoneos-arm64_universal.deb"
+          cat "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/BUILD-INFO.txt"
+          cat "${GITHUB_WORKSPACE}/release-frida-${FRIDA_VERSION}/SHA256SUMS"
 
       - name: Upload DEB artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: frida-17.5.0-iphone13-ios16.6-universal-debs
-          path: release-frida-17.5.0/
+          name: frida-${{ env.FRIDA_VERSION }}-iphone13-ios16.6-universal-debs
+          path: release-frida-${{ env.FRIDA_VERSION }}/
           if-no-files-found: error
           retention-days: 7
 
