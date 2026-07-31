@@ -1,0 +1,15 @@
+{
+  "name": "frida-ios-objc-bridge-loader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "mkdir -p dist && frida-compile objc-bridge-loader.ts -o dist/objc-bridge-loader.bundle.js"
+  },
+  "dependencies": {
+    "frida-objc-bridge": "8.0.6"
+  },
+  "devDependencies": {
+    "frida-compile": "19.0.5"
+  }
+}
